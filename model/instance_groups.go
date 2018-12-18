@@ -465,19 +465,36 @@ func (g *InstanceGroup) IsPrivileged() bool {
 	return false
 }
 
-// PodSecurityPolicy determines the name of the pod security policy
-// governing the specified instance group.
-func (g *InstanceGroup) PodSecurityPolicy() string {
-	result := LeastPodSecurityPolicy()
-
-	// Note: validateRoleRun ensured non-nil of job.ContainerProperties.BoshContainerization.PodSecurityPolicy
-
-	for _, job := range g.JobReferences {
-		result = MergePodSecurityPolicies(result,
-			job.ContainerProperties.BoshContainerization.PodSecurityPolicy)
+// IsPrivilegedPodSecurityPolicy tests if this instance group requires a
+// privileged pod security policy
+func (g *InstanceGroup) IsPrivilegedPodSecurityPolicy() bool {
+	if g.IsPrivileged() {
+		return true
 	}
+	for _, job := range g.JobReferences {
+		if job.ContainerProperties.BoshContainerization.PodSecurityPolicy == PodSecurityPolicyPrivileged {
+			return true
+		}
+	}
+	return false
+}
 
-	return result
+// QQPodSecurityPolicy needs to be deleted
+func (g *InstanceGroup) QQPodSecurityPolicy() string {
+	return ""
+	// TODO: Do something about resolving pod security policies
+	/*
+		result := LeastPodSecurityPolicy()
+
+		// Note: validateRoleRun ensured non-nil of job.ContainerProperties.BoshContainerization.PodSecurityPolicy
+
+		for _, job := range g.JobReferences {
+			result = MergePodSecurityPolicies(result,
+				job.ContainerProperties.BoshContainerization.PodSecurityPolicy)
+		}
+
+		return result
+	*/
 }
 
 // IsColocated tests if the role is of type ColocatedContainer, or

@@ -514,7 +514,7 @@ func getSecurityContext(role *model.InstanceGroup, createHelmChart bool) helm.No
 	}
 
 	sc := helm.NewMapping()
-	allowPrivileged := role.PodSecurityPolicy() == model.PodSecurityPolicyPrivileged
+	allowPrivileged := model.PodSecurityPolicy{}.AllowPrivileged()
 
 	capabilities := role.Run.Capabilities
 	if createHelmChart {

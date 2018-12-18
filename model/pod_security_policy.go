@@ -8,11 +8,21 @@ package model
 // manifest is then responsible for mapping the abstract names/levels
 // to concrete policies implementing them.
 
+import (
+	apipolicy "k8s.io/api/policy/v1beta1"
+)
+
 // Pod security policy constants
 const (
 	PodSecurityPolicyNonPrivileged = "nonprivileged"
 	PodSecurityPolicyPrivileged    = "privileged"
 )
+
+// PodSecurityPolicy defines a pod security policy
+type PodSecurityPolicy struct {
+	apipolicy.PodSecurityPolicySpec
+	roleManifest *RoleManifest
+}
 
 // PodSecurityPolicies returns the names of the pod security policies
 // usable in fissile manifests
@@ -23,28 +33,39 @@ func PodSecurityPolicies() []string {
 	}
 }
 
-// ValidPodSecurityPolicy checks if the argument is the name of a
-// fissile pod security policy
-func ValidPodSecurityPolicy(name string) bool {
-	for _, legal := range PodSecurityPolicies() {
-		if name == legal {
+// KnownPodSecurityPolicy checks if the given pod security policy name is the
+// name of a known pod security policy
+func (policy *PodSecurityPolicy) KnownPodSecurityPolicy(name string) bool {
+	if policy.roleManifest != nil {
+		for policyName := range policy.roleManifest.Configuration.Authorization.PodSecurityPolicies {
+			if policyName == name {
+				return true
+			}
+		}
+	}
+	for _, builtInName := range PodSecurityPolicies() {
+		if builtInName == name {
 			return true
 		}
 	}
 	return false
 }
 
-// MergePodSecurityPolicies takes two policies (names) and returns the
-// policy (name) representing the union of their privileges.
-func MergePodSecurityPolicies(policyA, policyB string) string {
-	if policyA == PodSecurityPolicyPrivileged || policyB == PodSecurityPolicyPrivileged {
-		return PodSecurityPolicyPrivileged
-	}
-	return PodSecurityPolicyNonPrivileged
+// PrivilegeEscalationAllowed checks if this policy is set to allow privilege escalation
+func (policy PodSecurityPolicy) PrivilegeEscalationAllowed() bool {
+	return policy.AllowPrivilegeEscalation != nil && *policy.AllowPrivilegeEscalation
 }
 
-// LeastPodSecurityPolicy returns the name of the bottom-level pod
-// security policy (least-privileged)
-func LeastPodSecurityPolicy() string {
+// CloneAsPrivileged returns a new pod security policy that allows privilege escalation
+func (policy PodSecurityPolicy) CloneAsPrivileged() *PodSecurityPolicy {
+	if policy.PrivilegeEscalationAllowed() {
+		return &policy
+	}
+	dummy := true
+	policy.AllowPrivilegeEscalation = &dummy
+	return &policy
+}
+
+func DefaultPodSecurityPolicyName() string {
 	return PodSecurityPolicyNonPrivileged
 }

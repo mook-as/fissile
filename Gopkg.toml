@@ -112,3 +112,7 @@
 [prune]
   go-tests = true
   unused-packages = true
+
+[[constraint]]
+  name = "k8s.io/api"
+  version = "kubernetes-1.13.1"

@@ -194,13 +194,14 @@ func (r *Resolver) ResolveRoleManifest() error {
 		if !r.releaseResolver.CanValidate() {
 			allErrs = append(allErrs, validateScripts(m, r.options.ValidationOptions)...)
 		}
+		allErrs = append(allErrs, resolvePodSecurityPolicies(m)...)
 	}
 
 	if len(allErrs) != 0 {
 		return fmt.Errorf(allErrs.Errors())
 	}
 
-	return resolvePodSecurityPolicies(m)
+	return nil
 }
 
 // ResolveLinks examines the BOSH links specified in the job specs and maps
@@ -336,59 +337,166 @@ func (r *Resolver) ResolveLinks() validation.ErrorList {
 	return errors
 }
 
-// resolvePodSecurityPolicies moves the PSP information found in
-// RoleManifest.InstanceGroup.JobReferences[].ContainerProperties.BoshContainerization.PodSecurityPolicy to
-// RoleManifest.Configuration.Authorization.Accounts[].PodSecurityPolicy
-// As service accounts can reference only one PSP the operation makes
-// clones of the base SA as needed. Note that the clones reference the same
-// roles as the base, and that the roles are not cloned.
-func resolvePodSecurityPolicies(m *model.RoleManifest) error {
-	for _, instanceGroup := range m.InstanceGroups {
-		// Note: validateRoleRun ensured non-nil of instanceGroup.Run
+// resolvePodSecurityPolicies handles backwards compatibility for the PSP
+// information in the obsolete
+// RoleManifest.InstanceGroup.JobReferences[].ContainerProperties.BoshContainerization.PodSecurityPolicy
+// that is now handled explicitly via
+// RoleManifest.Configuration.Authorization.PodSecurityPolicies instead.  This
+// also handles creating the necessary cluster roles.
+// As service accounts can reference only one PSP the operation makes clones of
+// the base service account as needed (though, again, that is deprecated).
+// Note that the clones reference the same roles as the base service account,
+// and that the roles are not clones.
+func resolvePodSecurityPolicies(m *model.RoleManifest) validation.ErrorList {
+	errors := make(validation.ErrorList, 0)
 
-		pspName := instanceGroup.PodSecurityPolicy()
-		accountName := instanceGroup.Run.ServiceAccount
-		account, ok := m.Configuration.Authorization.Accounts[accountName]
-
-		if account.PodSecurityPolicy == "" {
-			// The account has no PSP information at all.
-			// Have it use the PSP of this group
-			if !ok {
-				m.Configuration.Authorization.Accounts = make(map[string]model.AuthAccount)
+	// Figure out the PSP to use as the default privileged PSP
+	defaultClusterRoleName := ""
+	defaultPrivilegedPSPName := ""
+	for pspName, psp := range m.Configuration.Authorization.PodSecurityPolicies {
+		if util.StringInSlice(pspName, []string{"privileged", "default"}) {
+			if psp.PrivilegeEscalationAllowed() {
+				defaultPrivilegedPSPName = pspName
+				break
 			}
-			account.PodSecurityPolicy = pspName
-			m.Configuration.Authorization.Accounts[accountName] = account
-			continue
 		}
-
-		if account.PodSecurityPolicy == pspName {
-			// The account's PSP matches the group-requested PSP.
-			// There is nothing to do.
-			continue
-		}
-
-		// The group references a service account which
-		// references a different PSP than the group
-		// expects. To fix this we:
-		// 1. Clone the account
-		// 2. Set the clone's PSP to the group's PSP
-		// 3. Add the clone to the map, under a new name.
-		// 4. Change the group to reference the clone
-		//
-		// However: The clone may already exist. In that case
-		// only step 4 is needed.
-
-		newAccountName := fmt.Sprintf("%s-%s", accountName, pspName)
-
-		if _, ok := m.Configuration.Authorization.Accounts[newAccountName]; !ok {
-			newAccount := account
-			newAccount.PodSecurityPolicy = pspName
-
-			m.Configuration.Authorization.Accounts[newAccountName] = newAccount
-		}
-
-		instanceGroup.Run.ServiceAccount = newAccountName
 	}
+
+	clusterRolePSPNames := make(map[string][]string)
+
+	// Figure out if each cluster role has attached pod security policies
+	for clusterRoleName, clusterRole := range m.Configuration.Authorization.ClusterRoles {
+		for _, rule := range clusterRole {
+			if !rule.IsPodSecurityPolicyRule() {
+				continue
+			}
+			for _, resourceName := range rule.ResourceNames {
+				if _, ok := m.Configuration.Authorization.PodSecurityPolicies[resourceName]; ok {
+					clusterRolePSPNames[clusterRoleName] = append(clusterRolePSPNames[clusterRoleName], resourceName)
+					if resourceName == defaultPrivilegedPSPName {
+						defaultClusterRoleName = clusterRoleName
+					}
+				}
+			}
+		}
+	}
+
+	// Figure out if each account has any PSPs set (via the cluster role)
+	for accountName, account := range m.Configuration.Authorization.Accounts {
+		for clusterRoleIndex, clusterRoleName := range account.ClusterRoles {
+			_, ok := m.Configuration.Authorization.ClusterRoles[clusterRoleName]
+			if !ok {
+				// cluster role is missing
+				errors = append(errors, validation.NotFound(
+					fmt.Sprintf(`configuration.auth.accounts[%s].cluster-roles[%d]`, accountName, clusterRoleIndex),
+					fmt.Sprintf(`cluster role name %q not found`, clusterRoleName)))
+				continue
+			}
+			for _, clusterRolePSPName := range clusterRolePSPNames[clusterRoleName] {
+				psp := m.Configuration.Authorization.PodSecurityPolicies[clusterRolePSPName]
+				account.PodSecurityPolicies[clusterRolePSPName] = psp
+				break
+			}
+		}
+		m.Configuration.Authorization.Accounts[accountName] = account
+	}
+
+	// Check that each instance group has an attached PSP, and that privileged
+	// instance groups are attached to privileged PSPs
+instanceGroupLoop:
+	for _, instanceGroup := range m.InstanceGroups {
+		// Check for a service account that has an attached PSP
+		accountName := instanceGroup.Run.ServiceAccount
+		if accountName == "" {
+			accountName = "default"
+		}
+		account, ok := m.Configuration.Authorization.Accounts[accountName]
+		if len(account.PodSecurityPolicies) > 0 {
+			if !instanceGroup.IsPrivilegedPodSecurityPolicy() {
+				// For now we don't drop privileges; so if the instance group doesn't require additional privileges we
+				// can just ignore it.
+				continue
+			}
+			// Check that some PSP is privileged enough
+			for _, psp := range account.PodSecurityPolicies {
+				if psp.PrivilegeEscalationAllowed() {
+					continue instanceGroupLoop
+				}
+			}
+			// The account is attached to one or more PSPs, but none are privileged. Clone the account, attach it to a
+			// cloned PSP (that includes the necessary privileges), then make the instance group use the cloned account.
+			privilegedAccountName := fmt.Sprintf("%s-privileged", accountName)
+			if _, ok := m.Configuration.Authorization.Accounts[privilegedAccountName]; ok {
+				// The privileged account already exists, just use it
+				instanceGroup.Run.ServiceAccount = privilegedAccountName
+				continue
+			}
+
+			if defaultClusterRoleName == "" {
+				if defaultPrivilegedPSPName == "" {
+					errors = append(errors, validation.NotFound(
+						fmt.Sprintf(`configuration.auth.accounts[%s].pod-security-policy`, accountName),
+						fmt.Sprintf(`Instance group %q requires privileges, but no suitable pod security policy was found.`, instanceGroup.Name)))
+					return errors
+				}
+
+				// Create a cluster role to use the default privileged PSP
+
+			}
+		}
+	}
+
+	return errors
+
+	// TODO: implement resolving PSPs
+	/*
+		for _, instanceGroup := range m.InstanceGroups {
+			// Note: validateRoleRun ensured non-nil of instanceGroup.Run
+
+			pspName := instanceGroup.PodSecurityPolicy()
+			accountName := instanceGroup.Run.ServiceAccount
+			account, ok := m.Configuration.Authorization.Accounts[accountName]
+
+			if account.PodSecurityPolicy == "" {
+				// The account has no PSP information at all.
+				// Have it use the PSP of this group
+				if !ok {
+					m.Configuration.Authorization.Accounts = make(map[string]model.AuthAccount)
+				}
+				account.PodSecurityPolicy = pspName
+				m.Configuration.Authorization.Accounts[accountName] = account
+				continue
+			}
+
+			if account.PodSecurityPolicy == pspName {
+				// The account's PSP matches the group-requested PSP.
+				// There is nothing to do.
+				continue
+			}
+
+			// The group references a service account which
+			// references a different PSP than the group
+			// expects. To fix this we:
+			// 1. Clone the account
+			// 2. Set the clone's PSP to the group's PSP
+			// 3. Add the clone to the map, under a new name.
+			// 4. Change the group to reference the clone
+			//
+			// However: The clone may already exist. In that case
+			// only step 4 is needed.
+
+			newAccountName := fmt.Sprintf("%s-%s", accountName, pspName)
+
+			if _, ok := m.Configuration.Authorization.Accounts[newAccountName]; !ok {
+				newAccount := account
+				newAccount.PodSecurityPolicy = pspName
+
+				m.Configuration.Authorization.Accounts[newAccountName] = newAccount
+			}
+
+			instanceGroup.Run.ServiceAccount = newAccountName
+		}
+	*/
 
 	return nil
 }
