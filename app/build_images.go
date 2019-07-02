@@ -19,6 +19,7 @@ type BuildImagesOptions struct {
 	Force                    bool
 	Labels                   map[string]string
 	NoBuild                  bool
+	PackageFromOBS           bool
 	OutputDirectory          string
 	PatchPropertiesDirective string
 	Roles                    []string
@@ -74,31 +75,36 @@ func (f *Fissile) BuildImages(opt BuildImagesOptions) error {
 		opt.StemcellID = stemcellImage.ID
 	}
 
-	packagesImageBuilder := &builder.PackagesImageBuilder{
-		RepositoryPrefix:     f.Options.RepositoryPrefix,
-		StemcellImageName:    opt.Stemcell,
-		StemcellImageID:      opt.StemcellID,
-		CompiledPackagesPath: f.StemcellCompilationDir(opt.Stemcell),
-		FissileVersion:       f.Version,
-	}
-
 	instanceGroups, err := f.Manifest.SelectInstanceGroups(opt.Roles)
 	if err != nil {
 		return err
 	}
 
-	if opt.OutputDirectory == "" {
-		err = f.buildPackagesImage(opt, instanceGroups, packagesImageBuilder)
+	var imageName string
+	if opt.PackageFromOBS {
+		imageName = opt.StemcellID
 	} else {
-		err = f.buildPackagesTarball(opt, instanceGroups, packagesImageBuilder)
-	}
-	if err != nil {
-		return err
-	}
+		packagesImageBuilder := &builder.PackagesImageBuilder{
+			RepositoryPrefix:     f.Options.RepositoryPrefix,
+			StemcellImageName:    opt.Stemcell,
+			StemcellImageID:      opt.StemcellID,
+			CompiledPackagesPath: f.StemcellCompilationDir(opt.Stemcell),
+			FissileVersion:       f.Version,
+		}
 
-	imageName, err := packagesImageBuilder.GetImageName(f.Manifest, instanceGroups, f)
-	if err != nil {
-		return err
+		if opt.OutputDirectory == "" {
+			err = f.buildPackagesImage(opt, instanceGroups, packagesImageBuilder)
+		} else {
+			err = f.buildPackagesTarball(opt, instanceGroups, packagesImageBuilder)
+		}
+		if err != nil {
+			return err
+		}
+
+		imageName, err = packagesImageBuilder.GetImageName(f.Manifest, instanceGroups, f)
+		if err != nil {
+			return err
+		}
 	}
 
 	roleImageBuilder := &builder.RoleImageBuilder{
@@ -113,6 +119,7 @@ func (f *Fissile) BuildImages(opt BuildImagesOptions) error {
 		ManifestPath:       f.Manifest.ManifestFilePath,
 		MetricsPath:        f.Options.Metrics,
 		NoBuild:            opt.NoBuild,
+		PackagesFromOBS:    opt.PackageFromOBS,
 		OutputDirectory:    opt.OutputDirectory,
 		RepositoryPrefix:   f.Options.RepositoryPrefix,
 		TagExtra:           opt.TagExtra,

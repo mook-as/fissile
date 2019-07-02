@@ -51,6 +51,7 @@ type RoleImageBuilder struct {
 	ManifestPath       string
 	MetricsPath        string
 	NoBuild            bool
+	PackagesFromOBS    bool
 	OutputDirectory    string
 	RepositoryPrefix   string
 	TagExtra           string
@@ -89,23 +90,25 @@ func (r *RoleImageBuilder) NewDockerPopulator(instanceGroup *model.InstanceGroup
 		}
 
 		// Symlink compiled packages
-		packageSet := map[string]string{}
+		packageSet := map[string]*model.Package{}
 		for _, jobReference := range instanceGroup.JobReferences {
 			for _, pkg := range jobReference.Packages {
 				if _, ok := packageSet[pkg.Name]; !ok {
-					err := util.WriteToTarStream(tarWriter, nil, tar.Header{
-						Name:     filepath.Join("root/var/vcap/packages", pkg.Name),
-						Typeflag: tar.TypeSymlink,
-						Linkname: filepath.Join(".src", pkg.Fingerprint),
-					})
-					if err != nil {
-						return fmt.Errorf("failed to write package symlink for %s: %s", pkg.Name, err)
+					if !r.PackagesFromOBS {
+						err := util.WriteToTarStream(tarWriter, nil, tar.Header{
+							Name:     filepath.Join("root/var/vcap/packages", pkg.Name),
+							Typeflag: tar.TypeSymlink,
+							Linkname: filepath.Join(".src", pkg.Fingerprint),
+						})
+						if err != nil {
+							return fmt.Errorf("failed to write package symlink for %s: %s", pkg.Name, err)
+						}
 					}
-					packageSet[pkg.Name] = pkg.Fingerprint
+					packageSet[pkg.Name] = pkg
 				} else {
-					if pkg.Fingerprint != packageSet[pkg.Name] {
+					if pkg.Fingerprint != packageSet[pkg.Name].Fingerprint {
 						r.UI.Printf("WARNING: duplicate package %s. Using package with fingerprint %s.\n",
-							color.CyanString(pkg.Name), color.RedString(packageSet[pkg.Name]))
+							color.CyanString(pkg.Name), color.RedString(packageSet[pkg.Name].Fingerprint))
 					}
 				}
 			}
@@ -113,9 +116,12 @@ func (r *RoleImageBuilder) NewDockerPopulator(instanceGroup *model.InstanceGroup
 
 		// Copy jobs templates, spec configs and monit
 		for _, jobReference := range instanceGroup.JobReferences {
-			err := addJobTemplates(jobReference.Job, "root/var/vcap/jobs-src", tarWriter)
-			if err != nil {
-				return err
+			if !r.PackagesFromOBS {
+				// When using OBS, job templates are installed from RPMs
+				err := addJobTemplates(jobReference.Job, "root/var/vcap/jobs-src", tarWriter)
+				if err != nil {
+					return err
+				}
 			}
 
 			// Write spec into <ROOT_DIR>/var/vcap/job-src/<JOB>/config_spec.json
@@ -209,7 +215,7 @@ func (r *RoleImageBuilder) NewDockerPopulator(instanceGroup *model.InstanceGroup
 
 		// Generate Dockerfile
 		buf := &bytes.Buffer{}
-		if err := r.generateDockerfile(instanceGroup, buf); err != nil {
+		if err := r.generateDockerfile(instanceGroup, packageSet, buf); err != nil {
 			return err
 		}
 		err = util.WriteToTarStream(tarWriter, buf.Bytes(), tar.Header{
@@ -294,7 +300,7 @@ func (r *RoleImageBuilder) generateJobsConfig(instanceGroup *model.InstanceGroup
 }
 
 // generateDockerfile builds a docker file for a given role.
-func (r *RoleImageBuilder) generateDockerfile(instanceGroup *model.InstanceGroup, outputFile io.Writer) error {
+func (r *RoleImageBuilder) generateDockerfile(instanceGroup *model.InstanceGroup, packageSet map[string]*model.Package, outputFile io.Writer) error {
 	asset, err := dockerfiles.Asset("Dockerfile-role")
 	if err != nil {
 		return err
@@ -303,9 +309,11 @@ func (r *RoleImageBuilder) generateDockerfile(instanceGroup *model.InstanceGroup
 	dockerfileTemplate := template.New("Dockerfile-role")
 
 	context := map[string]interface{}{
-		"base_image":     r.BaseImageName,
-		"instance_group": instanceGroup,
-		"licenses":       instanceGroup.JobReferences[0].Release.License.Files,
+		"base_image":        r.BaseImageName,
+		"instance_group":    instanceGroup,
+		"licenses":          instanceGroup.JobReferences[0].Release.License.Files,
+		"packages_from_obs": r.PackagesFromOBS,
+		"package_set":       packageSet,
 	}
 
 	dockerfileTemplate, err = dockerfileTemplate.Parse(string(asset))

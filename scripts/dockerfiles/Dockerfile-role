@@ -8,4 +8,13 @@ LABEL "instance_group"="{{ .instance_group.Name }}"
 
 ADD root /
 
+{{ if .packages_from_obs }}
+
+RUN set -x ; zypper --non-interactive addrepo --check obs://home:mook_work:scf home:mook_work:scf && \
+    zypper --non-interactive --gpg-auto-import-keys refresh && \
+    zypper --non-interactive install {{ range .package_set }} bosh-package-{{ .Release.Name }}-{{ .Name }} {{ end }} \
+    && false
+
+{{ end }}
+
 ENTRYPOINT ["/usr/bin/dumb-init", "/opt/fissile/run.sh"]

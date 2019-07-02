@@ -65,7 +65,7 @@ func TestGenerateRoleImageDockerfile(t *testing.T) {
 
 	var dockerfileContents bytes.Buffer
 	roleImageBuilder.BaseImageName = roleImageBuilder.RepositoryPrefix
-	err = roleImageBuilder.generateDockerfile(roleManifest.InstanceGroups[0], &dockerfileContents)
+	err = roleImageBuilder.generateDockerfile(roleManifest.InstanceGroups[0], map[string]*model.Package{}, &dockerfileContents)
 	assert.NoError(err)
 
 	dockerfileString := dockerfileContents.String()
@@ -78,7 +78,7 @@ func TestGenerateRoleImageDockerfile(t *testing.T) {
 	)
 
 	dockerfileContents.Reset()
-	err = roleImageBuilder.generateDockerfile(roleManifest.InstanceGroups[0], &dockerfileContents)
+	err = roleImageBuilder.generateDockerfile(roleManifest.InstanceGroups[0], map[string]*model.Package{}, &dockerfileContents)
 	assert.NoError(err)
 	dockerfileString = dockerfileContents.String()
 	assert.Contains(dockerfileString, "MAINTAINER", "dev mode should generate a maintainer layer")

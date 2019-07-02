@@ -37,6 +37,7 @@ from other specs.  At most one is allowed.
 
 		opt.NoBuild = buildImagesViper.GetBool("no-build")
 		opt.Force = buildImagesViper.GetBool("force")
+		opt.PackageFromOBS = buildImagesViper.GetBool("packages-from-obs")
 		opt.PatchPropertiesDirective = buildImagesViper.GetString("patch-properties-release")
 		opt.OutputDirectory = buildImagesViper.GetString("output-directory")
 		opt.Stemcell = buildImagesViper.GetString("stemcell")
@@ -86,6 +87,13 @@ func init() {
 		"F",
 		false,
 		"If specified, image creation will proceed even when images already exist.",
+	)
+
+	buildImagesCmd.PersistentFlags().BoolP(
+		"packages-from-obs",
+		"",
+		false,
+		"(Experimental) install packages from OpenSUSE Open Build Service (build.opensuse.org)",
 	)
 
 	buildImagesCmd.PersistentFlags().StringP(
